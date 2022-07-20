@@ -1,0 +1,187 @@
+- name: set solr port if necessary
+  set_fact:
+    solr_port: 8983
+  when: solr_port is not defined
+
+- name: solr required packages
+  become: yes
+  yum:
+    state: present
+    name:
+      - lsof
+
+- name: Ensure group solr exists
+  become: yes
+  group:
+    name: solr
+    state: present
+
+# solr startup script requires an enabled user, with
+# a real shell, and a valid password
+- name: solr user
+  become: yes
+  user:
+    name: solr
+    shell: /bin/bash
+    password: "$6$random_salt$NULr1R3MgNFy3ytIthn9lwnd4qXZGI4du0MEJb/jDxrl8TrAaS97I77FGI/fUCq8bL54vq7oC98GHT7UqSo/Q0"
+    update_password: on_create
+    state: present
+    group: solr
+
+- name: Solr folders
+  become: yes
+  file:
+    path: "{{ item }}"
+    state: directory
+    group: solr
+    owner: solr
+  loop:
+    - "{{ root_folder }}/data/solr"
+    - "{{ root_folder }}/log/solr"
+    - "{{ root_folder }}/app/solr"
+    - "{{ root_folder }}/install/solr"
+  register: solr_folder_structure
+
+- name: enable logrotate for solr log folder if necessary
+  include_tasks: "{{ role_path }}/../common/tasks/logrotate.yml"
+  args:
+    apply:
+      vars:
+        item: solr
+
+- include_tasks: "{{ role_path }}/../common/tasks/download.yml"
+  loop:
+    - name: "Solr"
+      dest: "{{ root_folder }}/install/solr/solr-{{ solr_version }}.tgz"
+      owner: "solr"
+      url: "https://archive.apache.org/dist/lucene/solr/{{ solr_version }}/solr-{{ solr_version }}.tgz"
+
+- name: unarchive Solr distribution
+  become: yes
+  become_user: solr
+  unarchive:
+    remote_src: yes
+    src: "{{ root_folder }}/install/solr/solr-{{ solr_version }}.tgz"
+    dest: "{{ root_folder }}/app/solr"
+    extra_opts:
+      - --strip-components=1
+    creates: "{{ root_folder }}/app/solr/LICENSE.txt"
+  register: solr_unarchived
+
+- name: configure Solr JMX
+  import_tasks: jmx.yml
+  when: solr_jmx_enabled|bool 
+
+- name: Create ArkCase Solr configset for Cores
+  import_tasks: configset.yml
+
+- name: Install Solr service
+  import_tasks: install-service.yml
+
+- name: start Solr
+  become: yes
+  systemd:
+    name: solr
+    state: started
+
+- name: wait for solr to finish starting
+  wait_for:
+    port: "{{ solr_port }}"
+    delay: 5
+    timeout: 60
+
+- name: Create ArkCase cores/collections
+  include_tasks: cores.yml
+  loop: "{{ solr_cores }}"
+  when: not initial_node is defined or initial_node
+
+- name: Expose required ports for solr
+  include_tasks: firewall.yml
+  when: enable_firewall is undefined or enable_firewall
+
+- name: find prometheus-exporter log4j jars that are vulnerable
+  find:
+    paths: "{{ root_folder }}/app/solr/contrib/prometheus-exporter/lib"
+    patterns: "log4j*"
+  register: log4j_prom_exp
+
+- name: remove prometheus-exporter vulnerable log4j jars
+  become: yes
+  file:
+    path: "{{ item.path }}"
+    state: absent
+  with_items: "{{ log4j_prom_exp.files }}"
+
+- name: find solr server log4j jars that are vulnerable
+  find:
+    paths: "{{ root_folder }}/app/solr/server/lib/ext"
+    patterns: "log4j*"
+  register: log4j_srv_jar
+
+- name: remove solr server vulnerable log4j jars
+  become: yes
+  file:
+    path: "{{ item.path }}"
+    state: absent
+  with_items: "{{ log4j_srv_jar.files }}"
+
+- name: download and install log4j-api jar
+  become: yes
+  get_url:
+    url: https://repo1.maven.org/maven2/org/apache/logging/log4j/log4j-api/{{ solr_log4j_version | default('2.17.1', true) }}/log4j-api-{{ solr_log4j_version | default('2.17.1', true) }}.jar
+    dest: "{{ item }}"
+    owner: 'solr'
+    group: 'solr'
+    mode: '0644'
+  with_items:
+    - "{{ root_folder }}/app/solr/contrib/prometheus-exporter/lib/log4j-api-{{ solr_log4j_version | default ('2.17.1', true) }}.jar"
+    - "{{ root_folder }}/app/solr/server/lib/ext/log4j-api-{{ solr_log4j_version | default ('2.17.1', true) }}.jar"
+
+- name: download and install log4j-core jar
+  become: yes
+  get_url:
+    url: https://repo1.maven.org/maven2/org/apache/logging/log4j/log4j-core/{{ solr_log4j_version | default ('2.17.1', true) }}/log4j-core-{{ solr_log4j_version | default ('2.17.1', true) }}.jar
+    dest: "{{ item }}"
+    owner: 'solr'
+    group: 'solr'
+    mode: '0644'
+  with_items:
+    - "{{ root_folder }}/app/solr/contrib/prometheus-exporter/lib/log4j-core-{{ solr_log4j_version | default ('2.17.1', true) }}.jar"
+    - "{{ root_folder }}/app/solr/server/lib/ext/log4j-core-{{ solr_log4j_version | default ('2.17.1', true) }}.jar"
+
+- name: download and install log4j-slf4j-impl jar
+  become: yes
+  get_url:
+    url: https://repo1.maven.org/maven2/org/apache/logging/log4j/log4j-slf4j-impl/{{ solr_log4j_version | default ('2.17.1', true) }}/log4j-slf4j-impl-{{ solr_log4j_version | default ('2.17.1', true) }}.jar
+    dest: "{{ item }}"
+    owner: 'solr'
+    group: 'solr'
+    mode: '0644'
+  with_items:
+      - "{{ root_folder }}/app/solr/contrib/prometheus-exporter/lib/log4j-slf4j-impl-{{ solr_log4j_version | default ('2.17.1', true) }}.jar"
+      - "{{ root_folder }}/app/solr/server/lib/ext/log4j-slf4j-impl-{{ solr_log4j_version | default ('2.17.1', true) }}.jar"
+
+- name: download and install log4j-1.2-api jar
+  become: yes
+  get_url:
+    url: https://repo1.maven.org/maven2/org/apache/logging/log4j/log4j-1.2-api/{{ solr_log4j_version | default ('2.17.1', true) }}/log4j-1.2-api-{{ solr_log4j_version | default ('2.17.1', true) }}.jar
+    dest: "{{ root_folder }}/app/solr/server/lib/ext/log4j-1.2-api-{{ solr_log4j_version | default ('2.17.1', true) }}.jar"
+    owner: 'solr'
+    group: 'solr'
+    mode: '0644'
+
+- name: download and install log4j-web jar
+  become: yes
+  get_url:
+    url: https://repo1.maven.org/maven2/org/apache/logging/log4j/log4j-web/{{ solr_log4j_version | default ('2.17.1', true) }}/log4j-web-{{ solr_log4j_version | default ('2.17.1', true) }}.jar
+    dest: "{{ root_folder }}/app/solr/server/lib/ext/log4j-web-{{ solr_log4j_version | default ('2.17.1', true) }}.jar"
+    owner: 'solr'
+    group: 'solr'
+    mode: '0644'
+  when: solr_version is version('8.8.2', '>=')
+
+- name: restart solr
+  become: yes
+  systemd:
+    name: solr
+    state: restarted
